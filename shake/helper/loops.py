@@ -10,6 +10,19 @@ import torch.nn.functional as F
 from .util import AverageMeter, accuracy
 
 
+def should_disable_kd(opt):
+    """
+    Determine whether to disable KD loss for spaced knowledge distillation.
+    Returns True if KD should be disabled, False otherwise.
+    """
+    if not hasattr(opt, 'use_space') or not opt.use_space:
+        return False
+    elif opt.space_counter < opt.space_length:
+        return True
+    else:
+        return False
+
+
 def train_vanilla(epoch, train_loader, model, criterion, optimizer, opt):
     """vanilla training"""
     model.train()
@@ -133,8 +146,12 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
         if opt.distill == 'kd':
             loss_kd = 0
         elif opt.distill == 'shake':
-            loss_kd = criterion_div(pred_feat_s, logit_s.detach()) + criterion_div(logit_s, pred_feat_s.detach())
-            loss_kd += criterion_cls(pred_feat_s, target) + F.mse_loss(pred_feat_s, logit_t.detach())
+            # Check if we should disable KD loss for spaced knowledge distillation
+            if should_disable_kd(opt):
+                loss_kd = 0
+            else:
+                loss_kd = criterion_div(pred_feat_s, logit_s.detach()) + criterion_div(logit_s, pred_feat_s.detach())
+                loss_kd += criterion_cls(pred_feat_s, target) + F.mse_loss(pred_feat_s, logit_t.detach())
         elif opt.distill == 'hint':
             f_s = module_list[1](feat_s[opt.hint_layer])
             f_t = feat_t[opt.hint_layer]
@@ -209,16 +226,37 @@ def train_distill(epoch, train_loader, module_list, criterion_list, optimizer, o
         batch_time.update(time.time() - end)
         end = time.time()
 
+        # update spaced knowledge distillation counter
+        if hasattr(opt, 'use_space') and opt.use_space:
+            prev_disable_kd = should_disable_kd(opt)
+            opt.space_counter += 1
+
+            # reset counter when completing a full cycle (2 * space_length)
+            if opt.space_counter >= 2 * opt.space_length:
+                opt.space_counter = 0
+
+            curr_disable_kd = should_disable_kd(opt)
+            # log when KD state changes
+            if prev_disable_kd != curr_disable_kd:
+                if curr_disable_kd:
+                    print(f"[*] Spaced-KD: Disabling SHAKE KD for next {opt.space_interval} epoch(s)")
+                else:
+                    print(f"[*] Spaced-KD: Enabling SHAKE KD for next {opt.space_interval} epoch(s)")
+
         # print info
         if idx % opt.print_freq == 0:
+            kd_status = ""
+            if hasattr(opt, 'use_space') and opt.use_space and opt.distill == 'shake':
+                kd_status = f" [KD: {'OFF' if should_disable_kd(opt) else 'ON'}]"
+
             print('Epoch: [{0}][{1}/{2}]\t'
                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
                   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                   'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                  'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                  'Acc@5 {top5.val:.3f} ({top5.avg:.3f}){kd_status}'.format(
                 epoch, idx, len(train_loader), batch_time=batch_time,
-                data_time=data_time, loss=losses, top1=top1, top5=top5))
+                data_time=data_time, loss=losses, top1=top1, top5=top5, kd_status=kd_status))
             sys.stdout.flush()
 
     print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
@@ -249,6 +287,7 @@ def validate(val_loader, model, criterion, opt):
             # compute output
             output = model(input)
             output = F.layer_norm(output, torch.Size((100,)), None, None, 1e-7) *  3.1415
+            loss = criterion(output, target)
 
             # measure accuracy and record loss
             acc1, acc5 = accuracy(output, target, topk=(1, 5))

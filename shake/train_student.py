@@ -67,7 +67,7 @@ def parse_option():
     # distillation
     parser.add_argument('--distill', type=str, default='kd', choices=['kd', 'hint', 'attention', 'similarity',
                                                                       'correlation', 'vid', 'crd', 'kdsvd', 'fsp',
-                                                                      'rkd', 'pkt', 'abound', 'factor', 'nst'])
+                                                                      'rkd', 'pkt', 'abound', 'factor', 'nst', 'shake'])
     parser.add_argument('--trial', type=str, default='1', help='trial id')
 
     parser.add_argument('-r', '--gamma', type=float, default=1, help='weight for classification')
@@ -86,6 +86,11 @@ def parse_option():
 
     # hint layer
     parser.add_argument('--hint_layer', default=2, type=int, choices=[0, 1, 2, 3, 4])
+
+    # spaced knowledge distillation
+    parser.add_argument('--space_interval', type=float, default=-1,
+                        help='interval for spaced knowledge distillation (in epochs). '
+                             'When > 0, enables spaced KD mode. Default: -1 (disabled)')
 
     opt = parser.parse_args()
 
@@ -290,6 +295,17 @@ def main():
     # validate teacher accuracy
     teacher_acc, _, _ = validate(val_loader, model_t, criterion_cls, opt)
     print('teacher accuracy: ', teacher_acc)
+
+    # initialize spaced knowledge distillation
+    if opt.space_interval > 0:
+        opt.use_space = True
+        opt.space_counter = 0
+        opt.space_length = int(opt.space_interval * len(train_loader))
+        print(f"[*] Spaced-KD enabled for SHAKE: interval={opt.space_interval} epochs, "
+              f"space_length={opt.space_length} batches")
+    else:
+        opt.use_space = False
+        print("[*] Spaced-KD disabled, using standard SHAKE training")
 
     # routine
     for epoch in range(1, opt.epochs + 1):
